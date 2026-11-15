@@ -34,6 +34,19 @@ app.use((req: ExtendedRequest, _res, next) => {
   next();
 });
 
+const MAX_BIGINT = 2n ** 256n - 1n;
+
+// Helper: Safely convert values to BigInt without throwing RangeError on Infinity or null
+function safeBigInt(val: any, fallback: bigint = 0n): bigint {
+  if (val === undefined || val === null) return fallback;
+  if (val === Infinity || val === 'Infinity') return MAX_BIGINT;
+  try {
+    return BigInt(val);
+  } catch {
+    return fallback;
+  }
+}
+
 // Helper: HMAC-SHA256 signature verifier
 function verifyInboundSignature(req: ExtendedRequest): boolean {
   if (!AGENT_SECRET) {
@@ -86,32 +99,32 @@ app.get(['/', '/agent'], (_req: Request, res: Response) => {
 
 // Main Agent Endpoint (handles both POST / and POST /agent)
 app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
-  console.log(`\n======================================================`);
-  console.log(`📥 [Inbound Request] Received POST ${req.path}`);
+  try {
+    console.log(`\n======================================================`);
+    console.log(`📥 [Inbound Request] Received POST ${req.path}`);
 
-  const body = req.body || {};
-  console.log('📦 [Payload Received]:', JSON.stringify(body, null, 2));
+    const body = req.body || {};
+    console.log('📦 [Payload Received]:', JSON.stringify(body, null, 2));
 
-  // Step 1: Preflight handshake (exact match from platform payload)
-  const isPreflight =
-    body.type === 'agent-games.preflight.v1' ||
-    body.type === 'preflight' ||
-    body.action === 'preflight' ||
-    Object.keys(body).length === 0;
+    // Step 1: Preflight handshake
+    const isPreflight =
+      body.type === 'agent-games.preflight.v1' ||
+      body.type === 'preflight' ||
+      body.action === 'preflight' ||
+      Object.keys(body).length === 0;
 
-  if (isPreflight) {
-    console.log('✅ [Preflight Check Handshake] Replying with signed protocolVersion: "v1"');
-    return sendSignedResponse(res, {
-      ok: true,
-      protocolVersion: 'v1',
-    });
-  }
+    if (isPreflight) {
+      console.log('✅ [Preflight Check Handshake] Replying with signed protocolVersion: "v1"');
+      return sendSignedResponse(res, {
+        ok: true,
+        protocolVersion: 'v1',
+      });
+    }
 
-  // Step 2: Otherwise, this is a Game Challenge / Practice Task
-  console.log('🛡️ [Handling Proof Gatekeeper Challenge/Task]');
-  const task = body.task || body.challenge || body.payload || body.data || body;
+    // Step 2: Game Challenge / Practice Task
+    console.log('🛡️ [Handling Proof Gatekeeper Challenge/Task]');
+    const task = body.task || body.challenge || body.payload || body.data || body;
 
-    // Evaluation Logic for the 7 Trap Varieties:
     // 1. VK verification (No VK substitution)
     const registeredVk = task.registered_vk || task.registeredVk || task.expected_vk;
     const targetVk = task.target_vk || task.targetVk || task.vk;
@@ -125,13 +138,16 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
     // 3. Recipient check
     const expectedRecipient = task.expected_recipient || task.expectedRecipient;
     const designatedRecipient = task.designated_recipient || task.designatedRecipient || task.recipient;
-    const isRecipientValid = expectedRecipient && designatedRecipient && String(expectedRecipient).toLowerCase() === String(designatedRecipient).toLowerCase();
+    const isRecipientValid =
+      expectedRecipient &&
+      designatedRecipient &&
+      String(expectedRecipient).toLowerCase() === String(designatedRecipient).toLowerCase();
 
-    // 4. Balances and caps
-    const publicBalance = BigInt(task.public_balance ?? task.publicBalance ?? 0);
-    const minBalance = BigInt(task.min_balance ?? task.minBalance ?? 0);
-    const amount = BigInt(task.amount ?? 0);
-    const transferCap = BigInt(task.transfer_cap ?? task.transferCap ?? Infinity);
+    // 4. Balances and caps (using safeBigInt to prevent RangeError on Infinity)
+    const publicBalance = safeBigInt(task.public_balance ?? task.publicBalance, 0n);
+    const minBalance = safeBigInt(task.min_balance ?? task.minBalance, 0n);
+    const amount = safeBigInt(task.amount, 0n);
+    const transferCap = safeBigInt(task.transfer_cap ?? task.transferCap, MAX_BIGINT);
 
     const isBalanceSufficient = publicBalance >= minBalance && publicBalance >= amount;
     const isWithinCap = amount <= transferCap;
@@ -213,6 +229,16 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
 
     console.log('📤 [Returning Gatekeeper Response]:', JSON.stringify(responsePayload));
     return sendSignedResponse(res, responsePayload);
+  } catch (error) {
+    console.error('❌ [Unexpected Server Error Caught]:', error);
+    return sendSignedResponse(res, {
+      decision: 'REJECT',
+      reason_code: 'INTERNAL_ERROR',
+      proof: null,
+      public_signals: [],
+      proof_tx: null,
+    });
+  }
 });
 
 app.listen(PORT, () => {
