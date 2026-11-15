@@ -77,9 +77,9 @@ app.get('/', (_req: Request, res: Response) => {
   });
 });
 
-// Main Agent Endpoint (Called by agentgames.zkverify.io)
-app.post('/agent', async (req: ExtendedRequest, res: Response) => {
-  console.log(`\n📥 [Inbound Request] Received POST /agent`);
+// Main Agent Endpoint (Called by agentgames.zkverify.io - handles both / and /agent)
+app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
+  console.log(`\n📥 [Inbound Request] Received POST ${req.path}`);
 
   // Step A: Inbound HMAC Verification
   if (!verifyInboundSignature(req)) {
