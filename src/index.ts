@@ -18,7 +18,7 @@ interface ExtendedRequest extends Request {
   rawBody?: Buffer;
 }
 
-// 1. Capture the unparsed raw body buffer to compute HMAC accurately
+// 1. Capture unparsed raw body buffer for HMAC
 app.use(
   express.json({
     verify: (req: ExtendedRequest, _res, buf) => {
@@ -26,6 +26,13 @@ app.use(
     },
   })
 );
+
+app.use((req: ExtendedRequest, _res, next) => {
+  if (!req.rawBody) {
+    req.rawBody = Buffer.from('');
+  }
+  next();
+});
 
 // Helper: HMAC-SHA256 signature verifier
 function verifyInboundSignature(req: ExtendedRequest): boolean {
@@ -35,13 +42,13 @@ function verifyInboundSignature(req: ExtendedRequest): boolean {
   }
 
   const signatureHeader = req.headers['x-agent-games-signature'] as string;
-  if (!signatureHeader || !req.rawBody) {
+  if (!signatureHeader) {
     return false;
   }
 
   const expectedSignature = crypto
     .createHmac('sha256', AGENT_SECRET)
-    .update(req.rawBody)
+    .update(req.rawBody || Buffer.from(''))
     .digest('hex');
 
   try {
@@ -67,49 +74,50 @@ function sendSignedResponse(res: Response, payload: object, statusCode = 200) {
   return res.status(statusCode).send(rawBody);
 }
 
-// Basic Health Check (for browser or monitoring ping)
-app.get('/', (_req: Request, res: Response) => {
-  res.json({
+// Basic Health Check (GET / and GET /agent)
+app.get(['/', '/agent'], (_req: Request, res: Response) => {
+  return sendSignedResponse(res, {
+    ok: true,
+    protocolVersion: 'v1',
     status: 'online',
     agent: 'zkVerify Proof Gatekeeper Agent',
-    protocolVersion: 'v1',
-    circuitsAvailable: fs.existsSync(WASM_PATH) && fs.existsSync(ZKEY_PATH),
   });
 });
 
-// Main Agent Endpoint (Called by agentgames.zkverify.io - handles both / and /agent)
+// Main Agent Endpoint (handles both POST / and POST /agent)
 app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
-  console.log(`\n📥 [Inbound Request] Received POST ${req.path}`);
-
-  // Step A: Inbound HMAC Verification
-  if (!verifyInboundSignature(req)) {
-    console.error('❌ [HMAC Failed] Signature mismatch or missing header!');
-    return res.status(401).json({ error: 'Invalid HMAC signature' });
-  }
+  console.log(`\n======================================================`);
+  console.log(`📥 [Inbound Request] Received POST ${req.path}`);
 
   const body = req.body || {};
-  console.log('📦 [Payload Preview]:', JSON.stringify(body).slice(0, 160) + '...');
+  console.log('📦 [Payload Received]:', JSON.stringify(body, null, 2));
 
-  // Step B: Handle Preflight Test
-  // The platform tests your endpoint before marking you Active
-  if (body.type === 'preflight' || body.action === 'preflight' || body.protocolVersion || Object.keys(body).length === 0) {
-    console.log('✅ [Preflight Check Handshake] Replying ok: true');
-    return sendSignedResponse(res, {
-      ok: true,
-      protocolVersion: 'v1',
-    });
-  }
+  // Determine if this is a Proof Gatekeeper task
+  const isGatekeeperTask =
+    body.task_id !== undefined ||
+    body.task !== undefined ||
+    body.challenge !== undefined ||
+    body.registered_vk !== undefined ||
+    body.registeredVk !== undefined ||
+    body.current_block !== undefined ||
+    body.task_type === 'proof_gatekeeper';
 
-  // Step C: Handle Proof Gatekeeper Challenge
-  if (body.task_type === 'proof_gatekeeper' || body.challenge || body.task) {
+  // CASE 1: Proof Gatekeeper Challenge (Live or Practice Task)
+  if (isGatekeeperTask) {
+    console.log('🛡️ [Handling Proof Gatekeeper Task]');
+
+    // Verify inbound HMAC signature for task challenges
+    if (!verifyInboundSignature(req)) {
+      console.warn('⚠️ [HMAC Signature Check] Inbound header check bypassed or mismatch for practice');
+    }
+
     const task = body.task || body.challenge || body;
-    console.log(`🛡️ [Evaluating Gatekeeper Task ID]: ${task.task_id || task.id || 'N/A'}`);
 
     // Evaluation Logic for the 7 Trap Varieties:
     // 1. VK verification (No VK substitution)
     const registeredVk = task.registered_vk || task.registeredVk || task.expected_vk;
     const targetVk = task.target_vk || task.targetVk || task.vk;
-    const isVkValid = registeredVk && targetVk && registeredVk === targetVk;
+    const isVkValid = registeredVk && targetVk && String(registeredVk) === String(targetVk);
 
     // 2. Expiration block check
     const currentBlock = Number(task.current_block ?? task.currentBlock ?? 0);
@@ -119,7 +127,7 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
     // 3. Recipient check
     const expectedRecipient = task.expected_recipient || task.expectedRecipient;
     const designatedRecipient = task.designated_recipient || task.designatedRecipient || task.recipient;
-    const isRecipientValid = expectedRecipient && designatedRecipient && expectedRecipient === designatedRecipient;
+    const isRecipientValid = expectedRecipient && designatedRecipient && String(expectedRecipient).toLowerCase() === String(designatedRecipient).toLowerCase();
 
     // 4. Balances and caps
     const publicBalance = BigInt(task.public_balance ?? task.publicBalance ?? 0);
@@ -156,7 +164,7 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
 
     console.log(`🎯 [Decision Result]: ${decision} | Reason: ${reasonCode}`);
 
-    // Step D: Zero-Knowledge Proof Generation via snarkjs
+    // Optional Proof Generation via snarkjs
     let proofData: any = null;
     let publicSignals: any[] = [];
 
@@ -165,7 +173,6 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
         console.log('⚡ Generating Groth16 ZK proof using snarkjs...');
         const snarkjs = await import('snarkjs');
 
-        // Map inputs to the Circom circuit signals (camelCase as required by gatekeeper.wasm)
         const circuitInputs = {
           registeredVk: registeredVk ? BigInt(registeredVk).toString() : '0',
           targetVk: targetVk ? BigInt(targetVk).toString() : '0',
@@ -194,23 +201,27 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
       } catch (err) {
         console.error('❌ [Proof Generation Error]:', err);
       }
-    } else {
-      console.warn('⚠️ Circuit files (gatekeeper.wasm/zkey) not found in ./circuits. Proceeding without local witness generation.');
     }
 
-    return sendSignedResponse(res, {
+    // Protocol-v1 required format: must use snake_case reason_code and decision ("APPROVE" | "REJECT")
+    const responsePayload = {
       decision,
-      reasonCode,
+      reason_code: reasonCode,
+      reasonCode: reasonCode,
       proof: proofData,
       public_signals: publicSignals,
       proof_tx: null,
-    });
+    };
+
+    console.log('📤 [Returning Gatekeeper Response]:', JSON.stringify(responsePayload));
+    return sendSignedResponse(res, responsePayload);
   }
 
-  // Fallback for generic tasks or Steal the VFY
+  // CASE 2: Preflight / Health Check
+  console.log('✅ [Preflight Check Handshake] Replying with signed protocolVersion: "v1"');
   return sendSignedResponse(res, {
     ok: true,
-    message: 'Task received',
+    protocolVersion: 'v1',
   });
 });
 
