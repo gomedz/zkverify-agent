@@ -92,26 +92,24 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
   const body = req.body || {};
   console.log('📦 [Payload Received]:', JSON.stringify(body, null, 2));
 
-  // Determine if this is a Proof Gatekeeper task
-  const isGatekeeperTask =
-    body.task_id !== undefined ||
-    body.task !== undefined ||
-    body.challenge !== undefined ||
-    body.registered_vk !== undefined ||
-    body.registeredVk !== undefined ||
-    body.current_block !== undefined ||
-    body.task_type === 'proof_gatekeeper';
+  // Step 1: Preflight handshake (exact match from platform payload)
+  const isPreflight =
+    body.type === 'agent-games.preflight.v1' ||
+    body.type === 'preflight' ||
+    body.action === 'preflight' ||
+    Object.keys(body).length === 0;
 
-  // CASE 1: Proof Gatekeeper Challenge (Live or Practice Task)
-  if (isGatekeeperTask) {
-    console.log('🛡️ [Handling Proof Gatekeeper Task]');
+  if (isPreflight) {
+    console.log('✅ [Preflight Check Handshake] Replying with signed protocolVersion: "v1"');
+    return sendSignedResponse(res, {
+      ok: true,
+      protocolVersion: 'v1',
+    });
+  }
 
-    // Verify inbound HMAC signature for task challenges
-    if (!verifyInboundSignature(req)) {
-      console.warn('⚠️ [HMAC Signature Check] Inbound header check bypassed or mismatch for practice');
-    }
-
-    const task = body.task || body.challenge || body;
+  // Step 2: Otherwise, this is a Game Challenge / Practice Task
+  console.log('🛡️ [Handling Proof Gatekeeper Challenge/Task]');
+  const task = body.task || body.challenge || body.payload || body.data || body;
 
     // Evaluation Logic for the 7 Trap Varieties:
     // 1. VK verification (No VK substitution)
@@ -215,14 +213,6 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
 
     console.log('📤 [Returning Gatekeeper Response]:', JSON.stringify(responsePayload));
     return sendSignedResponse(res, responsePayload);
-  }
-
-  // CASE 2: Preflight / Health Check
-  console.log('✅ [Preflight Check Handshake] Replying with signed protocolVersion: "v1"');
-  return sendSignedResponse(res, {
-    ok: true,
-    protocolVersion: 'v1',
-  });
 });
 
 app.listen(PORT, () => {
