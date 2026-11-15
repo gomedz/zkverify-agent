@@ -123,12 +123,12 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
 
     // Step 2: Game Challenge / Practice Task
     console.log('🛡️ [Handling Proof Gatekeeper Challenge/Task]');
-    const task = body.task || body.challenge || body.payload || body.data || body;
+    const task = body.input || body.task || body.challenge || body.payload || body.data || body;
 
     // 1. VK verification (No VK substitution)
     const registeredVk = task.registered_vk || task.registeredVk || task.expected_vk;
-    const targetVk = task.target_vk || task.targetVk || task.vk;
-    const isVkValid = registeredVk && targetVk && String(registeredVk) === String(targetVk);
+    const proofVk = task.proof_vk || task.target_vk || task.targetVk || task.vk;
+    const isVkValid = registeredVk && proofVk && String(registeredVk).toLowerCase() === String(proofVk).toLowerCase();
 
     // 2. Expiration block check
     const currentBlock = Number(task.current_block ?? task.currentBlock ?? 0);
@@ -136,23 +136,23 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
     const isNotExpired = currentBlock <= expiryBlock;
 
     // 3. Recipient check
-    const expectedRecipient = task.expected_recipient || task.expectedRecipient;
-    const designatedRecipient = task.designated_recipient || task.designatedRecipient || task.recipient;
+    const designatedRecipient = task.recipient || task.designated_recipient || task.designatedRecipient;
+    const conditionRecipient = task.condition_recipient || task.expected_recipient || task.expectedRecipient;
     const isRecipientValid =
-      expectedRecipient &&
       designatedRecipient &&
-      String(expectedRecipient).toLowerCase() === String(designatedRecipient).toLowerCase();
+      conditionRecipient &&
+      String(designatedRecipient).toLowerCase() === String(conditionRecipient).toLowerCase();
 
-    // 4. Balances and caps (using safeBigInt to prevent RangeError on Infinity)
+    // 4. Balances and caps (using safeBigInt)
     const publicBalance = safeBigInt(task.public_balance ?? task.publicBalance, 0n);
-    const minBalance = safeBigInt(task.min_balance ?? task.minBalance, 0n);
+    const minBalance = safeBigInt(task.minimum ?? task.min_balance ?? task.minBalance, 0n);
     const amount = safeBigInt(task.amount, 0n);
-    const transferCap = safeBigInt(task.transfer_cap ?? task.transferCap, MAX_BIGINT);
+    const maxTransfer = safeBigInt(task.max_transfer ?? task.transfer_cap ?? task.transferCap, MAX_BIGINT);
 
     const isBalanceSufficient = publicBalance >= minBalance && publicBalance >= amount;
-    const isWithinCap = amount <= transferCap;
+    const isWithinCap = amount <= maxTransfer;
 
-    // Determine final decision
+    // Determine final decision & matching reason code
     let decision: 'APPROVE' | 'REJECT' = 'REJECT';
     let reasonCode = 'VALID_CONDITION';
 
