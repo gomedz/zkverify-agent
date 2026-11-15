@@ -189,15 +189,15 @@ app.post(['/', '/agent'], async (req: ExtendedRequest, res: Response) => {
 
         const circuitInputs = {
           registeredVk: registeredVk ? BigInt(registeredVk).toString() : '0',
-          targetVk: targetVk ? BigInt(targetVk).toString() : '0',
+          targetVk: proofVk ? BigInt(proofVk).toString() : '0',
           minBalance: minBalance.toString(),
           publicBalance: publicBalance.toString(),
           expiryBlock: expiryBlock.toString(),
           currentBlock: currentBlock.toString(),
-          expectedRecipient: expectedRecipient ? BigInt(expectedRecipient).toString() : '0',
+          expectedRecipient: conditionRecipient ? BigInt(conditionRecipient).toString() : '0',
           designatedRecipient: designatedRecipient ? BigInt(designatedRecipient).toString() : '0',
           amount: amount.toString(),
-          transferCap: transferCap.toString(),
+          transferCap: maxTransfer.toString(),
           decision: decision === 'APPROVE' ? '1' : '0',
           taskId: task.task_id ? BigInt(task.task_id).toString() : '1',
           privateSalt: '1234567890123456',
