@@ -10,6 +10,9 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const AGENT_SECRET = process.env.AGENT_GAMES_HMAC_SECRET || '';
 const WASM_PATH = path.resolve(process.env.WASM_PATH || './circuits/gatekeeper.wasm');
 const ZKEY_PATH = path.resolve(process.env.ZKEY_PATH || './circuits/gatekeeper_final.zkey');
+// BN254 scalar field modulus r
+const BN254_R = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+const MAX_BIGINT = 2n ** 256n - 1n;
 // 1. Capture unparsed raw body buffer for HMAC
 app.use(express.json({
     verify: (req, _res, buf) => {
@@ -22,7 +25,6 @@ app.use((req, _res, next) => {
     }
     next();
 });
-const MAX_BIGINT = 2n ** 256n - 1n;
 // Helper: Safely convert values to BigInt without throwing RangeError on Infinity or null
 function safeBigInt(val, fallback = 0n) {
     if (val === undefined || val === null)
@@ -34,6 +36,18 @@ function safeBigInt(val, fallback = 0n) {
     }
     catch {
         return fallback;
+    }
+}
+// Convert hex string / address / number to valid BN254 field element string
+function toFieldString(val) {
+    if (val === undefined || val === null)
+        return '0';
+    try {
+        const bi = BigInt(val);
+        return (bi % BN254_R).toString();
+    }
+    catch {
+        return '0';
     }
 }
 // Helper: HMAC-SHA256 signature verifier
@@ -113,7 +127,7 @@ app.post(['/', '/agent'], async (req, res) => {
         const isRecipientValid = designatedRecipient &&
             conditionRecipient &&
             String(designatedRecipient).toLowerCase() === String(conditionRecipient).toLowerCase();
-        // 4. Balances and caps (using safeBigInt)
+        // 4. Balances and caps
         const publicBalance = safeBigInt(task.public_balance ?? task.publicBalance, 0n);
         const minBalance = safeBigInt(task.minimum ?? task.min_balance ?? task.minBalance, 0n);
         const amount = safeBigInt(task.amount, 0n);
@@ -148,36 +162,41 @@ app.post(['/', '/agent'], async (req, res) => {
             reasonCode = 'OK';
         }
         console.log(`🎯 [Decision Result]: ${decision} | Reason: ${reasonCode}`);
-        // Optional Proof Generation via snarkjs
+        // Step 3: Zero-Knowledge Proof Generation via snarkjs
+        // Proofs are generated when a task is APPROVED
         let proofData = null;
         let publicSignals = [];
-        if (fs.existsSync(WASM_PATH) && fs.existsSync(ZKEY_PATH)) {
+        if (decision === 'APPROVE' && fs.existsSync(WASM_PATH) && fs.existsSync(ZKEY_PATH)) {
             try {
                 console.log('⚡ Generating Groth16 ZK proof using snarkjs...');
                 const snarkjs = await import('snarkjs');
+                // The 13 exact circuit input signals for gatekeeper.wasm
                 const circuitInputs = {
-                    registeredVk: registeredVk ? BigInt(registeredVk).toString() : '0',
-                    targetVk: proofVk ? BigInt(proofVk).toString() : '0',
-                    minBalance: minBalance.toString(),
-                    publicBalance: publicBalance.toString(),
-                    expiryBlock: expiryBlock.toString(),
-                    currentBlock: currentBlock.toString(),
-                    expectedRecipient: conditionRecipient ? BigInt(conditionRecipient).toString() : '0',
-                    designatedRecipient: designatedRecipient ? BigInt(designatedRecipient).toString() : '0',
-                    amount: amount.toString(),
-                    transferCap: maxTransfer.toString(),
-                    decision: decision === 'APPROVE' ? '1' : '0',
-                    taskId: task.task_id ? BigInt(task.task_id).toString() : '1',
-                    privateSalt: '1234567890123456',
+                    registeredVkHash: toFieldString(registeredVk),
+                    proofVkHash: toFieldString(proofVk),
+                    minimum: toFieldString(minBalance),
+                    publicBalance: toFieldString(publicBalance),
+                    expiryBlock: toFieldString(expiryBlock),
+                    currentBlock: toFieldString(currentBlock),
+                    recipient: toFieldString(designatedRecipient),
+                    conditionRecipient: toFieldString(conditionRecipient),
+                    amount: toFieldString(amount),
+                    maxTransfer: toFieldString(maxTransfer),
+                    decision: '1',
+                    taskId: toFieldString(body.task_id || task.task_id || '1'),
+                    salt: '12345678',
                 };
                 const { proof, publicSignals: signals } = await snarkjs.groth16.fullProve(circuitInputs, WASM_PATH, ZKEY_PATH);
                 proofData = proof;
                 publicSignals = signals;
-                console.log('✨ [Proof Generated Successfully]');
+                console.log('✨ [Proof Generated Successfully! Public Signals Count:', signals.length, ']');
             }
             catch (err) {
-                console.error('❌ [Proof Generation Error]:', err);
+                console.error('❌ [Proof Generation Error]:', err.message);
             }
+        }
+        else if (decision === 'REJECT') {
+            console.log('ℹ️ Task rejected (trap detected). No approval proof required.');
         }
         // Protocol-v1 required format: must use snake_case reason_code and decision ("APPROVE" | "REJECT")
         const responsePayload = {
