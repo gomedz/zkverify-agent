@@ -163,13 +163,20 @@ app.post(['/', '/agent'], async (req, res) => {
         }
         console.log(`🎯 [Decision Result]: ${decision} | Reason: ${reasonCode}`);
         // Step 3: Zero-Knowledge Proof Generation via snarkjs
-        // Proofs are generated when a task is APPROVED
+        // Both APPROVE (1) and REJECT (0) decisions are proven cryptographically by the circuit
         let proofData = null;
         let publicSignals = [];
-        if (decision === 'APPROVE' && fs.existsSync(WASM_PATH) && fs.existsSync(ZKEY_PATH)) {
+        if (fs.existsSync(WASM_PATH) && fs.existsSync(ZKEY_PATH)) {
             try {
-                console.log('⚡ Generating Groth16 ZK proof using snarkjs...');
+                console.log(`⚡ Generating Groth16 ZK proof for decision: ${decision} (${decision === 'APPROVE' ? '1' : '0'})...`);
                 const snarkjs = await import('snarkjs');
+                // Extract a numeric or field representation for taskId
+                let taskIdStr = '1';
+                const rawTaskId = task.task_id || body.task_id;
+                if (rawTaskId) {
+                    const hexOnly = String(rawTaskId).replace(/[^0-9a-fA-F]/g, '');
+                    taskIdStr = toFieldString(hexOnly ? '0x' + hexOnly.slice(-16) : '1');
+                }
                 // The 13 exact circuit input signals for gatekeeper.wasm
                 const circuitInputs = {
                     registeredVkHash: toFieldString(registeredVk),
@@ -182,8 +189,8 @@ app.post(['/', '/agent'], async (req, res) => {
                     conditionRecipient: toFieldString(conditionRecipient),
                     amount: toFieldString(amount),
                     maxTransfer: toFieldString(maxTransfer),
-                    decision: '1',
-                    taskId: toFieldString(body.task_id || task.task_id || '1'),
+                    decision: decision === 'APPROVE' ? '1' : '0',
+                    taskId: taskIdStr,
                     salt: '12345678',
                 };
                 const { proof, publicSignals: signals } = await snarkjs.groth16.fullProve(circuitInputs, WASM_PATH, ZKEY_PATH);
@@ -194,9 +201,6 @@ app.post(['/', '/agent'], async (req, res) => {
             catch (err) {
                 console.error('❌ [Proof Generation Error]:', err.message);
             }
-        }
-        else if (decision === 'REJECT') {
-            console.log('ℹ️ Task rejected (trap detected). No approval proof required.');
         }
         // Protocol-v1 required format: must use snake_case reason_code and decision ("APPROVE" | "REJECT")
         const responsePayload = {
